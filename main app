@@ -1,4 +1,4 @@
-main.py import os
+import os
 import sqlite3
 from datetime import datetime
 from fastapi import FastAPI, Request, Response, HTTPException
@@ -12,7 +12,7 @@ load_dotenv()
 
 app = FastAPI()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-SECRET_KEY = os.getenv("SECRET_KEY", "change-this-secret-key")
+SECRET_KEY = os.getenv("SECRET_KEY", "change-this-secret-key-now")
 
 def get_db():
     conn = sqlite3.connect("answering.db")
@@ -26,234 +26,190 @@ def init_db():
         name TEXT NOT NULL,
         email TEXT UNIQUE NOT NULL,
         password TEXT NOT NULL,
-        phone_number TEXT UNIQUE NOT NULL,
+        phone_number TEXT UNIQUE,
         forwarding_number TEXT,
         subscription_status TEXT DEFAULT 'trial',
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS call_configs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        business_id INTEGER NOT NULL,
+        greeting TEXT,
+        questions TEXT,
+        send_to_email TEXT,
+        is_active INTEGER DEFAULT 1
     )''')
     conn.execute('''CREATE TABLE IF NOT EXISTS call_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         business_id INTEGER NOT NULL,
         caller_number TEXT,
-        action_taken TEXT,
-        recording_url TEXT,
+        answers TEXT,
         timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
         call_sid TEXT UNIQUE
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS pending_signups (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        business_name TEXT NOT NULL,
+        contact_email TEXT NOT NULL,
+        phone_to_forward TEXT NOT NULL,
+        notes TEXT,
+        status TEXT DEFAULT 'pending',
+        submitted_at TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
     conn.commit()
     conn.close()
 
 init_db()
 
-def verify_password(plain, hashed):
-    return pwd_context.verify(plain, hashed)
-
-def get_password_hash(password):
-    return pwd_context.hash(password)
-
-@app.get("/", response_class=HTMLResponse)
-async def home():
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head><title>Answering Service</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
-    <body style="font-family: Arial; text-align: center; padding: 50px;">
-        <h1>📞 Answering Service Pro</h1>
-        <p>Your AI-powered receptionist is ready.</p>
-        <h2>Pricing</h2>
-        <p>Daily: $9.99 | Weekly: $49.99 | Monthly: $99 | Yearly: $599</p>
-        <h3>Start 24-Hour Free Trial</h3>
-        <form id="register">
-            <input type="text" id="name" placeholder="Business Name" required><br>
-            <input type="email" id="email" placeholder="Email" required><br>
-            <input type="password" id="password" placeholder="Password" required><br>
-            <input type="tel" id="phone" placeholder="Your Phone Number" required><br>
-            <button type="submit">Register</button>
-        </form>
-        <script>
-            document.getElementById('register').onsubmit = async (e) => {
-                e.preventDefault();
-                const res = await fetch('/api/register', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        name: document.getElementById('name').value,
-                        email: document.getElementById('email').value,
-                        password: document.getElementById('password').value,
-                        phone_number: document.getElementById('phone').value
-                    })
-                });
-                const data = await res.json();
-                if (res.ok) {
-                    localStorage.setItem('token', data.token);
-                    window.location.href = '/dashboard';
-                } else {
-                    alert('Error: ' + data.detail);
-                }
-            };
-        </script>
-    </body>
-    </html>
-    """
-
-@app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard():
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head><title>Dashboard</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
-    <body style="font-family: Arial; padding: 20px;">
-        <h1>Business Dashboard</h1>
-        <p>Your answering service is active.</p>
-        <h2>Call Forwarding</h2>
-        <input type="tel" id="forwarding" placeholder="Your live number">
-        <button onclick="saveForwarding()">Save</button>
-        <h2>Call Logs</h2>
-        <div id="calls"></div>
-        <script>
-            const token = localStorage.getItem('token');
-            if (!token) window.location.href = '/';
-            
-            async function saveForwarding() {
-                const number = document.getElementById('forwarding').value;
-                await fetch('/api/forwarding', {
-                    method: 'POST',
-                    headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
-                    body: JSON.stringify({forwarding_number: number})
-                });
-                alert('Saved');
-            }
-            
-            async function loadCalls() {
-                const res = await fetch('/api/calls', {headers: {'Authorization': 'Bearer ' + token}});
-                const calls = await res.json();
-                document.getElementById('calls').innerHTML = calls.map(c => `<p>${c.timestamp}: ${c.action_taken || 'Call received'}</p>`).join('');
-            }
-            loadCalls();
-        </script>
-    </body>
-    </html>
-    """
-
-@app.post("/api/register")
-async def register(request: Request):
-    data = await request.json()
-    conn = get_db()
-    try:
-        hashed = get_password_hash(data['password'])
-        conn.execute("INSERT INTO businesses (name, email, password, phone_number) VALUES (?, ?, ?, ?)",
-                     (data['name'], data['email'], hashed, data['phone_number']))
-        conn.commit()
-        cursor = conn.execute("SELECT id FROM businesses WHERE email = ?", (data['email'],))
-        business = cursor.fetchone()
-        token = jwt.encode({"sub": business['id']}, SECRET_KEY)
-        return {"token": token}
-    except Exception as e:
-        raise HTTPException(400, str(e))
-    finally:
-        conn.close()
-
-@app.get("/api/calls")
-async def get_calls(request: Request):
-    auth = request.headers.get('Authorization')
-    if not auth:
-        raise HTTPException(401)
-    token = auth.replace('Bearer ', '')
-    try:
-        payload = jwt.decode(token, SECRET_KEY)
-        business_id = payload.get('sub')
-    except:
-        raise HTTPException(401)
-    conn = get_db()
-    calls = conn.execute("SELECT * FROM call_logs WHERE business_id = ? ORDER BY timestamp DESC", (business_id,)).fetchall()
-    conn.close()
-    return [dict(call) for call in calls]
-
-@app.post("/api/forwarding")
-async def update_forwarding(request: Request):
-    auth = request.headers.get('Authorization')
-    if not auth:
-        raise HTTPException(401)
-    token = auth.replace('Bearer ', '')
-    data = await request.json()
-    try:
-        payload = jwt.decode(token, SECRET_KEY)
-        business_id = payload.get('sub')
-    except:
-        raise HTTPException(401)
-    conn = get_db()
-    conn.execute("UPDATE businesses SET forwarding_number = ? WHERE id = ?", (data['forwarding_number'], business_id))
-    conn.commit()
-    conn.close()
-    return {"status": "updated"}
-
+# ========== MAIN WEBHOOK FOR INCOMING CALLS ==========
 @app.post("/twilio/incoming")
 async def twilio_incoming(request: Request):
     form = await request.form()
-    caller_id = form.get('Caller')
+    from_number = form.get('From', 'Unknown')
     call_sid = form.get('CallSid')
     
-    conn = get_db()
-    business = conn.execute("SELECT * FROM businesses WHERE phone_number = ?", (caller_id,)).fetchone()
-    
     resp = VoiceResponse()
-    if not business:
-        resp.say("Service not active. Goodbye.")
-        conn.close()
-        return Response(content=str(resp), media_type="application/xml")
     
-    conn.execute("INSERT INTO call_logs (business_id, caller_number, call_sid) VALUES (?, ?, ?)",
-                 (business['id'], form.get('From'), call_sid))
-    conn.commit()
-    conn.close()
-    
-    gather = Gather(num_digits=1, action=f"/twilio/menu/{call_sid}", method="POST")
-    gather.say(f"Thank you for calling. Press 1 for appointment, 2 to speak to someone, 3 for message.")
+    # Main menu for demo lines
+    gather = Gather(num_digits=1, action="/twilio/menu", method="POST")
+    gather.say("Welcome to Call-Forward. Press 1 for Doctor's Office demo. Press 2 for Restaurant demo. Press 3 for Plumbing demo. Press 4 for Salon demo. Press 5 to speak with sales.")
     resp.append(gather)
     
     return Response(content=str(resp), media_type="application/xml")
 
-@app.post("/twilio/menu/{call_sid}")
-async def twilio_menu(call_sid: str, request: Request):
+@app.post("/twilio/menu")
+async def handle_menu(request: Request):
     form = await request.form()
     digits = form.get('Digits')
-    
-    conn = get_db()
-    business = conn.execute("""
-        SELECT b.* FROM businesses b 
-        JOIN call_logs c ON b.id = c.business_id 
-        WHERE c.call_sid = ?
-    """, (call_sid,)).fetchone()
+    from_number = form.get('From', 'Unknown')
+    call_sid = form.get('CallSid')
     
     resp = VoiceResponse()
     
-    if digits == "2" and business and business['forwarding_number']:
-        resp.say("Connecting you now.")
-        resp.dial(business['forwarding_number'])
-    elif digits in ["1", "3"]:
-        action = "appointment" if digits == "1" else "message"
-        resp.say(f"Please record your {action} after the beep.")
-        resp.record(max_length=60, action=f"/twilio/save/{call_sid}/{action}", method="POST")
-    else:
-        resp.say("Goodbye.")
+    if digits == "1":
+        # Doctor Demo
+        gather = Gather(input='speech', action="/twilio/doctor/name", method="POST", speech_timeout="auto")
+        gather.say("Thank you for calling Dr. Feelgood. If this is an emergency, please hang up and dial 911. For non-emergency appointments, please tell me your name and which doctor you normally see.")
+        resp.append(gather)
     
-    conn.close()
+    elif digits == "2":
+        # Restaurant Demo
+        gather = Gather(input='speech', action="/twilio/restaurant/order", method="POST", speech_timeout="auto")
+        gather.say("Thank you for calling Pizza Palace. Please go ahead with your order when you're ready.")
+        resp.append(gather)
+    
+    elif digits == "3":
+        # Plumbing Demo
+        gather = Gather(input='speech', action="/twilio/plumber/issue", method="POST", speech_timeout="auto")
+        gather.say("Thank you for calling Roto Rooter Emergency Plumbing. Please tell me your name and what's the issue?")
+        resp.append(gather)
+    
+    elif digits == "4":
+        # Salon Demo
+        gather = Gather(input='speech', action="/twilio/salon/service", method="POST", speech_timeout="auto")
+        gather.say("Thank you for calling Nail Nirvana. Please tell me what service you'd like and which tech you prefer.")
+        resp.append(gather)
+    
+    elif digits == "5":
+        resp.say("Please visit our website at call-forward.org to sign up or contact us at hello@call-forward.org. Goodbye!")
+    
+    else:
+        resp.say("Invalid option. Goodbye!")
+    
     return Response(content=str(resp), media_type="application/xml")
 
-@app.post("/twilio/save/{call_sid}/{action}")
-async def twilio_save(call_sid: str, action: str, request: Request):
+# ========== DOCTOR DEMO FLOW ==========
+@app.post("/twilio/doctor/name")
+async def doctor_name(request: Request):
     form = await request.form()
-    recording_url = form.get('RecordingUrl')
-    
-    conn = get_db()
-    conn.execute("UPDATE call_logs SET action_taken = ?, recording_url = ? WHERE call_sid = ?",
-                 (action, recording_url, call_sid))
-    conn.commit()
-    conn.close()
+    speech_result = form.get('SpeechResult', '')
     
     resp = VoiceResponse()
-    resp.say("Thank you. Goodbye.")
+    gather = Gather(input='speech', action="/twilio/doctor/appointment", method="POST", speech_timeout="auto")
+    gather.say(f"Thank you. Dr. Smith is fully booked today and tomorrow. However, we have an opening on Thursday at 2:15 PM or Friday at 10:30 AM. Which works better for you?")
+    resp.append(gather)
     return Response(content=str(resp), media_type="application/xml")
+
+@app.post("/twilio/doctor/appointment")
+async def doctor_appointment(request: Request):
+    form = await request.form()
+    appointment_time = form.get('SpeechResult', '')
+    
+    resp = VoiceResponse()
+    resp.say(f"Great! Your appointment is confirmed. This was a demo of Call-Forward. Visit call-forward.org to set this up for your business. Goodbye!")
+    return Response(content=str(resp), media_type="application/xml")
+
+# ========== RESTAURANT DEMO FLOW ==========
+@app.post("/twilio/restaurant/order")
+async def restaurant_order(request: Request):
+    form = await request.form()
+    order = form.get('SpeechResult', '')
+    
+    resp = VoiceResponse()
+    gather = Gather(input='speech', action="/twilio/restaurant/confirm", method="POST", speech_timeout="auto")
+    gather.say(f"Let me repeat that: {order}. Is that correct? Say yes or no.")
+    resp.append(gather)
+    return Response(content=str(resp), media_type="application/xml")
+
+@app.post("/twilio/restaurant/confirm")
+async def restaurant_confirm(request: Request):
+    form = await request.form()
+    confirm = form.get('SpeechResult', '')
+    
+    resp = VoiceResponse()
+    resp.say("Great! Your order will be ready in 25 minutes. This was a demo of Call-Forward. Visit call-forward.org to set this up for your business. Goodbye!")
+    return Response(content=str(resp), media_type="application/xml")
+
+# ========== PLUMBER DEMO FLOW ==========
+@app.post("/twilio/plumber/issue")
+async def plumber_issue(request: Request):
+    form = await request.form()
+    issue = form.get('SpeechResult', '')
+    
+    resp = VoiceResponse()
+    gather = Gather(input='speech', action="/twilio/plumber/address", method="POST", speech_timeout="auto")
+    gather.say("Got it. I'm dispatching a plumber. What's your address?")
+    resp.append(gather)
+    return Response(content=str(resp), media_type="application/xml")
+
+@app.post("/twilio/plumber/address")
+async def plumber_address(request: Request):
+    form = await request.form()
+    address = form.get('SpeechResult', '')
+    
+    resp = VoiceResponse()
+    resp.say("A plumber will arrive within 60 minutes. This was a demo of Call-Forward. Visit call-forward.org to set this up for your business. Goodbye!")
+    return Response(content=str(resp), media_type="application/xml")
+
+# ========== SALON DEMO FLOW ==========
+@app.post("/twilio/salon/service")
+async def salon_service(request: Request):
+    form = await request.form()
+    service = form.get('SpeechResult', '')
+    
+    resp = VoiceResponse()
+    gather = Gather(input='speech', action="/twilio/salon/time", method="POST", speech_timeout="auto")
+    gather.say(f"Great choice. We have openings today at 2 PM or tomorrow at 11 AM. Which works for you?")
+    resp.append(gather)
+    return Response(content=str(resp), media_type="application/xml")
+
+@app.post("/twilio/salon/time")
+async def salon_time(request: Request):
+    form = await request.form()
+    time = form.get('SpeechResult', '')
+    
+    resp = VoiceResponse()
+    resp.say("Your appointment is confirmed. This was a demo of Call-Forward. Visit call-forward.org to set this up for your business. Goodbye!")
+    return Response(content=str(resp), media_type="application/xml")
+
+# ========== HEALTH CHECK ==========
+@app.get("/")
+async def home():
+    return {"message": "Call-Forward.org API is live!", "status": "healthy"}
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 if __name__ == "__main__":
     import uvicorn
